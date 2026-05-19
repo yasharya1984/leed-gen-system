@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: lgs-postgres
+    environment:
+      POSTGRES_USER: lgs_user
+      POSTGRES_PASSWORD: lgs_secure_password_change_me
+      POSTGRES_DB: lgs_core
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=200
+      - -c
+      - max_wal_senders=5
+      - -c
+      - wal_keep_size=1GB
+      - -c
+      - default_statistics_target=100
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persistent data volume for state preservation
+      - lgs_postgres_data:/var/lib/postgresql/data
+      # Initialize schema on startup
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lgs_user -d lgs_core"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - lgs_network
+
+volumes:
+  lgs_postgres_data:
+    driver: local
+
+networks:
+  lgs_network:
+    driver: bridge
