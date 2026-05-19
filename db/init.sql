@@ -10,6 +10,26 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "citext";
 
 -- ============================================================================
+-- TABLE: users
+-- Stores authenticated user accounts that own campaigns
+-- ============================================================================
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    email CITEXT NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL DEFAULT 'user'
+        CHECK (role IN ('admin', 'user', 'viewer')),
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_login_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_users_email ON users(email);
+CREATE INDEX idx_users_role ON users(role);
+
+-- ============================================================================
 -- TABLE: campaigns
 -- Stores lead generation campaign metadata and configuration
 -- ============================================================================
@@ -261,6 +281,16 @@ BEGIN
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER tr_users_update_timestamp
+    BEFORE UPDATE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION update_timestamp();
+
+-- FK: campaigns -> users (optional, user_id may be null for system campaigns)
+ALTER TABLE campaigns
+    ADD CONSTRAINT fk_campaigns_user_id
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE TRIGGER tr_campaigns_update_timestamp
     BEFORE UPDATE ON campaigns

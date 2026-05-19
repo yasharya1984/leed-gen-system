@@ -1,0 +1,53 @@
+[package]
+name = "lgs-rust-spine"
+version = "0.1.0"
+edition = "2021"
+authors = ["LGS Team"]
+description = "Lead Generation System - Rust Tokio Concurrency Spine"
+
+[dependencies]
+# Async runtime and concurrency primitives
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging and observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Standard utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+
+# Optional: metrics collection
+prometheus = { version = "0.13", optional = true }
+
+# Optional: OpenTelemetry integration
+opentelemetry = { version = "0.20", optional = true }
+opentelemetry-jaeger = { version = "0.19", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = "0.5"
+
+[features]
+default = ["metrics"]
+metrics = ["prometheus"]
+tracing-full = ["opentelemetry", "opentelemetry-jaeger"]
+
+[[bench]]
+name = "queue_throughput"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
