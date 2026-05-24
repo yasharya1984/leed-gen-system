@@ -1,0 +1,5 @@
+# Exclude editor swap/backup files from the image
+*.swp
+*.swo
+*~
+.DS_Store

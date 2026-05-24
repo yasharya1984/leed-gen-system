@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lgs/queue-engine/pkg/auth"
 	"github.com/lgs/queue-engine/pkg/campaign"
 	"github.com/lgs/queue-engine/pkg/config"
 	"github.com/lgs/queue-engine/pkg/db"
@@ -71,21 +71,30 @@ func main() {
 }
 
 func registerRoutes(mux *http.ServeMux, userSvc *users.Service, campaignSvc *campaign.Service) {
+	// Public routes — no token required.
 	mux.HandleFunc("POST /api/v1/auth/register", handleRegister(userSvc))
 	mux.HandleFunc("POST /api/v1/auth/login", handleLogin(userSvc))
 
-	mux.HandleFunc("GET /api/v1/campaigns", authMiddleware(userSvc, handleListCampaigns(campaignSvc)))
-	mux.HandleFunc("POST /api/v1/campaigns", authMiddleware(userSvc, handleCreateCampaign(campaignSvc)))
-	mux.HandleFunc("GET /api/v1/campaigns/{id}", authMiddleware(userSvc, handleGetCampaign(campaignSvc)))
-	mux.HandleFunc("PATCH /api/v1/campaigns/{id}", authMiddleware(userSvc, handleUpdateCampaign(campaignSvc)))
-	mux.HandleFunc("DELETE /api/v1/campaigns/{id}", authMiddleware(userSvc, handleDeleteCampaign(campaignSvc)))
+	// protect wraps any handler so it requires a valid Bearer JWT.
+	// Missing, expired, or invalid tokens receive 403 Forbidden.
+	protect := auth.Middleware(userSvc)
+
+	// Campaign routes — all require authentication.
+	mux.HandleFunc("GET /api/v1/campaigns", protect(handleListCampaigns(campaignSvc)))
+	mux.HandleFunc("POST /api/v1/campaigns", protect(handleCreateCampaign(campaignSvc)))
+	mux.HandleFunc("GET /api/v1/campaigns/{id}", protect(handleGetCampaign(campaignSvc)))
+	mux.HandleFunc("PATCH /api/v1/campaigns/{id}", protect(handleUpdateCampaign(campaignSvc)))
+	// Explicit status transition endpoint — separate from a general PATCH so
+	// callers express intent clearly and audit logs record the right event type.
+	mux.HandleFunc("PATCH /api/v1/campaigns/{id}/status", protect(handleSetCampaignStatus(campaignSvc)))
+	mux.HandleFunc("DELETE /api/v1/campaigns/{id}", protect(handleDeleteCampaign(campaignSvc)))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 }
 
-// --- Auth handlers ---
+// ── Auth handlers ─────────────────────────────────────────────────────────────
 
 func handleRegister(svc *users.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -134,11 +143,17 @@ func handleLogin(svc *users.Service) http.HandlerFunc {
 	}
 }
 
-// --- Campaign handlers ---
+// ── Campaign handlers ─────────────────────────────────────────────────────────
 
 func handleListCampaigns(svc *campaign.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		campaigns, err := svc.ListByUser(r.Context(), userIDFromCtx(r), nil)
+		// Optional ?status= filter, e.g. GET /campaigns?status=active
+		var statusFilter *models.CampaignStatus
+		if s := r.URL.Query().Get("status"); s != "" {
+			st := models.CampaignStatus(s)
+			statusFilter = &st
+		}
+		campaigns, err := svc.ListByUser(r.Context(), auth.UserID(r), statusFilter)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -163,7 +178,7 @@ func handleCreateCampaign(svc *campaign.Service) http.HandlerFunc {
 		if !decodeBody(w, r, &in) {
 			return
 		}
-		uid := userIDFromCtx(r)
+		uid := auth.UserID(r)
 		c, err := svc.Create(r.Context(), campaign.CreateInput{
 			Name:          in.Name,
 			Description:   in.Description,
@@ -176,6 +191,10 @@ func handleCreateCampaign(svc *campaign.Service) http.HandlerFunc {
 			UserID:        &uid,
 			BudgetCents:   in.BudgetCents,
 		})
+		if errors.Is(err, campaign.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -190,7 +209,9 @@ func handleGetCampaign(svc *campaign.Service) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		c, err := svc.GetByID(r.Context(), id)
+		// GetByIDForUser enforces ownership: returns 404 for campaigns the caller
+		// does not own, avoiding information leakage about other users' campaigns.
+		c, err := svc.GetByIDForUser(r.Context(), id, auth.UserID(r))
 		if errors.Is(err, campaign.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
 			return
@@ -213,9 +234,41 @@ func handleUpdateCampaign(svc *campaign.Service) http.HandlerFunc {
 		if !decodeBody(w, r, &in) {
 			return
 		}
-		c, err := svc.Update(r.Context(), id, in)
+		c, err := svc.Update(r.Context(), id, auth.UserID(r), in)
 		if errors.Is(err, campaign.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, c)
+	}
+}
+
+// handleSetCampaignStatus transitions a campaign to an explicit status value.
+// This is separate from the general PATCH so callers can express intent clearly
+// and so the service layer can write the correct audit_logs event_type.
+func handleSetCampaignStatus(svc *campaign.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseUUID(w, r.PathValue("id"))
+		if !ok {
+			return
+		}
+		var in struct {
+			Status models.CampaignStatus `json:"status"`
+		}
+		if !decodeBody(w, r, &in) {
+			return
+		}
+		c, err := svc.SetStatus(r.Context(), id, auth.UserID(r), in.Status)
+		if errors.Is(err, campaign.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, campaign.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		if err != nil {
@@ -232,7 +285,7 @@ func handleDeleteCampaign(svc *campaign.Service) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if err := svc.Delete(r.Context(), id); errors.Is(err, campaign.ErrNotFound) {
+		if err := svc.Delete(r.Context(), id, auth.UserID(r)); errors.Is(err, campaign.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
 			return
 		} else if err != nil {
@@ -243,43 +296,7 @@ func handleDeleteCampaign(svc *campaign.Service) http.HandlerFunc {
 	}
 }
 
-// --- Middleware ---
-
-type ctxKey string
-
-const ctxUserID ctxKey = "user_id"
-
-func authMiddleware(svc *users.Service, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		token, ok := strings.CutPrefix(auth, "Bearer ")
-		if !ok || token == "" {
-			writeError(w, http.StatusUnauthorized, errors.New("missing bearer token"))
-			return
-		}
-		claims, err := svc.ValidateToken(token)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, errors.New("invalid token"))
-			return
-		}
-		uid, err := uuid.Parse(claims.UserID)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, errors.New("invalid token claims"))
-			return
-		}
-		ctx := context.WithValue(r.Context(), ctxUserID, uid)
-		next(w, r.WithContext(ctx))
-	}
-}
-
-func userIDFromCtx(r *http.Request) uuid.UUID {
-	if id, ok := r.Context().Value(ctxUserID).(uuid.UUID); ok {
-		return id
-	}
-	return uuid.Nil
-}
-
-// --- Helpers ---
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {

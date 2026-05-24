@@ -86,12 +86,26 @@ The system is built around a **decoupled, event-driven architecture** where serv
     *   **Boundary Constraints:** Implements a strict crawler navigation ceiling limiting path depth targets to a **maximum of 5 total subdirectory pages** down to **2 directory layout levels maximum** (`/contact`, `/about`).
     *   Features automated base64 screenshot capture routines that upload UI capture files directly to persistent object storage (MinIO) during workflow errors for debugging audits.
 
-### 7. `frontend` (React SPA)
+### 7. `frontend` (Next.js 15 — App Router)
 *   **Role:** Operations Control Dashboard.
+*   **Stack:** Next.js 15, React 19, Tailwind CSS, TanStack React Query v5, Axios.
 *   **Responsibilities:**
-    *   Provides a clean web interface displaying metric card grids, system log feeds, campaign activation controls, and charts visualizing lead metrics.
-    *   Implements secure frontend JWT session storage and state mutations, allowing operators to seamlessly initiate, suspend, or replicate data workflows.
-    *   Provides high-efficiency memory-streaming interface configurations to let users export structured data directly as filtered CSV or JSON files.
+    *   Provides a polished B2B SaaS dashboard with sidebar navigation, campaign list/create/status management, and real-time toast notifications.
+    *   Implements JWT session management via a browser cookie (`lgs_session`) shared between the Axios request interceptor and Next.js Edge Middleware.
+    *   `middleware.ts` guards all `/dashboard/*` routes server-side; a React Query response interceptor handles 403 Forbidden → session expiry redirect.
+    *   Full campaign lifecycle management: create, filter by status, transition status (active → paused → completed → archived), and delete.
+*   **Module README:** [`frontend/README.md`](frontend/README.md)
+
+---
+
+## Module READMEs
+
+| Module | README |
+|--------|--------|
+| `frontend/` | [frontend/README.md](frontend/README.md) |
+| `pkg/auth/` | [pkg/auth/README.md](pkg/auth/README.md) |
+| `pkg/campaign/` | [pkg/campaign/README.md](pkg/campaign/README.md) |
+| `services/api-gateway/` | [services/api-gateway/README.md](services/api-gateway/README.md) |
 
 ---
 

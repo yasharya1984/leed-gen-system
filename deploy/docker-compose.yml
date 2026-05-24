@@ -1,11 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# LGS — Docker Compose stack
+#
+# Services:
+#   postgres  — PostgreSQL 15, auto-initialised from init-scripts/
+#   backend   — Go API gateway (requires postgres to be healthy)
+#   frontend  — Next.js 15 dashboard (requires backend to be up)
+#
+# All three share the `lgs_network` bridge so they can reach each other by
+# container hostname: postgres:5432, backend:8080, frontend:3000.
+#
+# This file lives in deploy/ but is always invoked from the repository root
+# via the Makefile, which passes:
+#   docker compose --project-directory . -f deploy/docker-compose.yml
+#
+# --project-directory . causes Docker Compose to:
+#   • resolve all relative build context paths from the repo root
+#   • load the .env file from the repo root (not from deploy/)
+#
+# Copy .env.example → .env at the repo root and fill in secrets before
+# running `make up`.
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:15-alpine
+    build:
+      context: ./services/postgres
+      dockerfile: Dockerfile
+    image: lgs-postgres
     container_name: lgs-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: lgs_user
-      POSTGRES_PASSWORD: lgs_secure_password_change_me
-      POSTGRES_DB: lgs_core
+      POSTGRES_USER:     ${DB_USER:-lgs_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-lgs_secure_password_change_me}
+      POSTGRES_DB:       ${DB_NAME:-lgs_core}
     command:
       - postgres
       - -c
@@ -16,36 +45,99 @@ services:
       - maintenance_work_mem=64MB
       - -c
       - max_connections=200
-      - -c
-      - max_wal_senders=5
-      - -c
-      - wal_keep_size=1GB
-      - -c
-      - default_statistics_target=100
     ports:
-      - "5432:5432"
+      # Expose to the host so you can connect with psql / pgAdmin during dev.
+      - "${DB_EXPOSE_PORT:-5432}:5432"
     volumes:
-      # Persistent data volume for state preservation
       - lgs_postgres_data:/var/lib/postgresql/data
-      # Initialize schema on startup
-      - ../services/postgres/init-scripts:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lgs_user -d lgs_core"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-lgs_user} -d ${DB_NAME:-lgs_core}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
     networks:
       - lgs_network
 
+  # ── Backend (Go API gateway) ─────────────────────────────────────────────────
+  backend:
+    build:
+      # go.mod lives at the repo root and the source spans both pkg/ and
+      # services/backend/, so the build context must be the repo root.
+      context: .
+      dockerfile: services/backend/Dockerfile
+    image: lgs-backend
+    container_name: lgs-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Service discovery: the backend reaches postgres by Docker hostname.
+      DB_HOST:           postgres
+      DB_PORT:           5432
+      DB_NAME:           ${DB_NAME:-lgs_core}
+      DB_USER:           ${DB_USER:-lgs_user}
+      DB_PASSWORD:       ${DB_PASSWORD:-lgs_secure_password_change_me}
+      DB_SSLMODE:        ${DB_SSLMODE:-disable}
+      REDIS_ADDR:        ${REDIS_ADDR:-redis:6379}
+      JWT_SECRET:        ${JWT_SECRET:-change-me-in-production}
+      JWT_EXPIRY_HOURS:  ${JWT_EXPIRY_HOURS:-24}
+      SERVER_PORT:       8080
+    ports:
+      # Exposed to the host so the browser and `curl` can hit the API directly.
+      - "${BACKEND_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - lgs_network
+
+  # ── Frontend (Next.js) ───────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* vars are baked into the JS bundle at build time.
+        # This must be the URL the *browser* can reach — i.e. the host-mapped
+        # backend port, not the internal Docker hostname.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    image: lgs-frontend
+    container_name: lgs-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - lgs_network
+
+# ── Persistence ───────────────────────────────────────────────────────────────
 volumes:
   lgs_postgres_data:
     driver: local
 
+# ── Networking ────────────────────────────────────────────────────────────────
 networks:
   lgs_network:
     driver: bridge
