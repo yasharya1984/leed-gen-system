@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +25,10 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	cfg := config.Load()
 	ctx := context.Background()
 
@@ -34,9 +40,10 @@ func main() {
 
 	redisClient, err := rdb.Connect(ctx, cfg.Redis)
 	if err != nil {
-		log.Fatalf("redis connect: %v", err)
+		log.Printf("warning: redis unavailable (%v) — queue features disabled", err)
+	} else {
+		defer redisClient.Close()
 	}
-	defer redisClient.Close()
 
 	userSvc := users.NewService(pool, cfg.JWT)
 	campaignSvc := campaign.NewService(pool)
@@ -46,7 +53,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      mux,
+		Handler:      requestLogger(corsMiddleware(cfg.Server.AllowedOrigins, mux)),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -68,6 +75,94 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rr *responseRecorder) WriteHeader(status int) {
+	rr.status = status
+	rr.ResponseWriter.WriteHeader(status)
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(rec, r)
+
+		// Skip noisy health-check pings from the log.
+		if r.URL.Path == "/health" {
+			return
+		}
+
+		args := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"ip", clientIP(r),
+			"user_agent", r.UserAgent(),
+		}
+
+		if q := r.URL.RawQuery; q != "" {
+			args = append(args, "query", q)
+		}
+
+		// User identity is injected into the context by the auth middleware.
+		// For public routes (login, register) the context values are zero.
+		if uid := auth.UserID(r); uid != (uuid.UUID{}) {
+			args = append(args, "user_id", uid.String(), "role", string(auth.Role(r)))
+		}
+
+		level := slog.LevelInfo
+		if rec.status >= 500 {
+			level = slog.LevelError
+		} else if rec.status >= 400 {
+			level = slog.LevelWarn
+		}
+		slog.Log(r.Context(), level, "request", args...)
+	})
+}
+
+func clientIP(r *http.Request) string {
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		return strings.SplitN(v, ",", 2)[0]
+	}
+	if v := r.Header.Get("X-Real-IP"); v != "" {
+		return v
+	}
+	return r.RemoteAddr
+}
+
+func corsMiddleware(allowedOrigins string, next http.Handler) http.Handler {
+	allowed := make(map[string]bool)
+	for _, o := range strings.Split(allowedOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func registerRoutes(mux *http.ServeMux, userSvc *users.Service, campaignSvc *campaign.Service) {
@@ -117,6 +212,7 @@ func handleRegister(svc *users.Service) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		slog.Info("user_registered", "user_id", u.ID, "email", u.Email, "name", u.Name, "role", u.Role)
 		writeJSON(w, http.StatusCreated, u)
 	}
 }
@@ -139,6 +235,7 @@ func handleLogin(svc *users.Service) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		slog.Info("user_login", "user_id", u.ID, "email", u.Email, "name", u.Name, "role", u.Role)
 		writeJSON(w, http.StatusOK, map[string]any{"user": u, "token": token})
 	}
 }
@@ -199,6 +296,13 @@ func handleCreateCampaign(svc *campaign.Service) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		slog.Info("campaign_created",
+			"campaign_id", c.ID,
+			"campaign_name", c.Name,
+			"input_type", c.InputType,
+			"budget_cents", c.BudgetCents,
+			"user_id", uid,
+		)
 		writeJSON(w, http.StatusCreated, c)
 	}
 }
@@ -275,6 +379,12 @@ func handleSetCampaignStatus(svc *campaign.Service) http.HandlerFunc {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		slog.Info("campaign_status_changed",
+			"campaign_id", c.ID,
+			"campaign_name", c.Name,
+			"new_status", c.Status,
+			"user_id", auth.UserID(r),
+		)
 		writeJSON(w, http.StatusOK, c)
 	}
 }
@@ -285,13 +395,15 @@ func handleDeleteCampaign(svc *campaign.Service) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if err := svc.Delete(r.Context(), id, auth.UserID(r)); errors.Is(err, campaign.ErrNotFound) {
+		uid := auth.UserID(r)
+		if err := svc.Delete(r.Context(), id, uid); errors.Is(err, campaign.ErrNotFound) {
 			writeError(w, http.StatusNotFound, err)
 			return
 		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		slog.Info("campaign_deleted", "campaign_id", id, "user_id", uid)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

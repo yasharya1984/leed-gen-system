@@ -36,7 +36,8 @@ type RedisConfig struct {
 }
 
 type ServerConfig struct {
-	Port int
+	Port           int
+	AllowedOrigins string // comma-separated, e.g. "http://localhost:3000,https://app.example.com"
 }
 
 type JWTConfig struct {
@@ -60,7 +61,8 @@ func Load() *Config {
 			DB:       getEnvInt("REDIS_DB", 0),
 		},
 		Server: ServerConfig{
-			Port: getEnvInt("SERVER_PORT", 8080),
+			Port:           getEnvInt("SERVER_PORT", 8080),
+			AllowedOrigins: getEnv("ALLOWED_ORIGINS", "http://localhost:3000"),
 		},
 		JWT: JWTConfig{
 			Secret:      getEnv("JWT_SECRET", "change-me-in-production"),

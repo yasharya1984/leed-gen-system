@@ -28,7 +28,7 @@ services:
     build:
       context: ./services/postgres
       dockerfile: Dockerfile
-    image: lgs-postgres
+    image: lgs-postgres:${TAG:-latest}
     container_name: lgs-postgres
     restart: unless-stopped
     environment:
@@ -71,7 +71,7 @@ services:
       # services/backend/, so the build context must be the repo root.
       context: .
       dockerfile: services/backend/Dockerfile
-    image: lgs-backend
+    image: lgs-backend:${TAG:-latest}
     container_name: lgs-backend
     restart: unless-stopped
     depends_on:
@@ -89,6 +89,7 @@ services:
       JWT_SECRET:        ${JWT_SECRET:-change-me-in-production}
       JWT_EXPIRY_HOURS:  ${JWT_EXPIRY_HOURS:-24}
       SERVER_PORT:       8080
+      ALLOWED_ORIGINS:   ${ALLOWED_ORIGINS:-http://localhost:3000}
     ports:
       # Exposed to the host so the browser and `curl` can hit the API directly.
       - "${BACKEND_PORT:-8080}:8080"
@@ -116,7 +117,7 @@ services:
         # This must be the URL the *browser* can reach — i.e. the host-mapped
         # backend port, not the internal Docker hostname.
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
-    image: lgs-frontend
+    image: lgs-frontend:${TAG:-latest}
     container_name: lgs-frontend
     restart: unless-stopped
     depends_on:

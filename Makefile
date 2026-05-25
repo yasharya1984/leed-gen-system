@@ -1,4 +1,6 @@
-.PHONY: build build-backend build-frontend build-postgres \
+.PHONY: build build-backend build-frontend build-postgres build-seq \
+        pull-base \
+        tag images push \
         up down restart \
         logs logs-backend logs-frontend logs-postgres \
         ps shell-backend shell-db \
@@ -8,14 +10,32 @@
         help
 
 COMPOSE := docker compose --project-directory . -f deploy/docker-compose.yml
-PROJECT := lgs
 
-# ── Docker: images ────────────────────────────────────────────────────────────
+# ── Image tag ─────────────────────────────────────────────────────────────────
+# Defaults to 'latest'. Override per-invocation:
+#   make build TAG=v1.2.3
+#   make build TAG=$(shell git rev-parse --short HEAD)
+TAG ?= latest
+# Export so docker compose can interpolate ${TAG} in deploy/docker-compose.yml.
+export TAG
 
-## build: Build all Docker images in parallel.
+# All three image base names — used by the `tag` and `push` targets.
+IMAGES := lgs-postgres lgs-backend lgs-frontend
+
+# ── Docker: build images ──────────────────────────────────────────────────────
+
+## build: Build all images in parallel with the current TAG (default: latest).
+##        Example: make build TAG=v1.2.3
 build:
-	@echo "→ Building all service images…"
+	@echo "→ Building all service images (TAG=$(TAG))…"
 	$(COMPOSE) build --parallel
+
+## build-seq: Build images sequentially — use when parallel pulls time out.
+build-seq:
+	@echo "→ Building images sequentially (TAG=$(TAG))…"
+	$(COMPOSE) build postgres
+	$(COMPOSE) build backend
+	$(COMPOSE) build frontend
 
 ## build-backend: Build only the backend image.
 build-backend:
@@ -29,11 +49,54 @@ build-frontend:
 build-postgres:
 	$(COMPOSE) build postgres
 
+## pull-base: Pull all base images into the local cache.
+##            Run this before 'make build' if Docker Hub is timing out.
+##            Once images are cached locally the build won't need the network.
+pull-base:
+	@echo "→ Pulling base images…"
+	docker pull golang:1.25-alpine
+	docker pull alpine:3.19
+	docker pull node:20-alpine
+	docker pull postgres:15-alpine
+	@echo "→ Base images cached. Re-run 'make build' now."
+
+# ── Docker: tag & push ────────────────────────────────────────────────────────
+
+## images: List all built LGS images.
+images:
+	@echo ""
+	@docker images --filter "reference=lgs-*" \
+	  --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.CreatedSince}}"
+	@echo ""
+
+## tag: Re-tag lgs-*:latest images with TAG.
+##      Example: make tag TAG=v1.2.3
+tag:
+	@if [ "$(TAG)" = "latest" ]; then \
+	  echo "Error: set a version — e.g. make tag TAG=v1.2.3"; exit 1; \
+	fi
+	@for img in $(IMAGES); do \
+	  echo "  $$img:latest → $$img:$(TAG)"; \
+	  docker tag $$img:latest $$img:$(TAG); \
+	done
+	@echo "✓ Tagged lgs-*:latest → lgs-*:$(TAG)"
+
+## push: Push lgs-* images to REGISTRY with TAG.
+##       Example: make push TAG=v1.2.3 REGISTRY=ghcr.io/myorg
+REGISTRY ?=
+push:
+	@test -n "$(REGISTRY)" || (echo "Error: set REGISTRY — e.g. make push REGISTRY=ghcr.io/myorg TAG=v1.2.3"; exit 1)
+	@for img in $(IMAGES); do \
+	  echo "  Pushing $(REGISTRY)/$$img:$(TAG)"; \
+	  docker tag  $$img:$(TAG) $(REGISTRY)/$$img:$(TAG); \
+	  docker push $(REGISTRY)/$$img:$(TAG); \
+	done
+
 # ── Docker: stack lifecycle ───────────────────────────────────────────────────
 
 ## up: Start the full LGS stack in detached mode.
 up:
-	@echo "→ Starting LGS stack…"
+	@echo "→ Starting LGS stack (TAG=$(TAG))…"
 	$(COMPOSE) up -d --remove-orphans
 	@echo ""
 	@echo "  Frontend  → http://localhost:$${FRONTEND_PORT:-3000}"

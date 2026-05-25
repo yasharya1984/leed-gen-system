@@ -55,7 +55,7 @@ RUN addgroup --system --gid 1001 nodejs \
 
 # The standalone bundle is a complete Node server — copy it along with the
 # static assets which must be nested at .next/static inside the server root.
-COPY --from=builder /app/public                      ./public
+COPY --from=builder --chown=nextjs:nodejs /app/public           ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static     ./.next/static
 

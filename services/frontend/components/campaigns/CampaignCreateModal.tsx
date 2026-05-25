@@ -28,15 +28,15 @@ export function CampaignCreateModal({ open, onClose }: CampaignCreateModalProps)
     e.preventDefault()
     const fd = new FormData(e.currentTarget)
 
-    const rawKeywords     = (fd.get('keywords')     as string).trim()
-    const rawProfiles     = (fd.get('seed_profiles') as string).trim()
-    const rawAiQueries    = (fd.get('ai_queries')    as string).trim()
+    const rawKeywords     = ((fd.get('keywords')      as string) ?? '').trim()
+    const rawProfiles     = ((fd.get('seed_profiles') as string) ?? '').trim()
+    const rawAiQueries    = ((fd.get('ai_queries')    as string) ?? '').trim()
     const budgetDollars   = parseFloat((fd.get('budget_dollars') as string) || '0')
-    const maxResultsRaw   = (fd.get('max_results') as string).trim()
+    const maxResultsRaw   = ((fd.get('max_results')  as string) ?? '').trim()
 
     const input: CreateCampaignInput = {
-      name:          (fd.get('name') as string).trim(),
-      description:   (fd.get('description') as string).trim() || undefined,
+      name:          ((fd.get('name') as string) ?? '').trim(),
+      description:   ((fd.get('description') as string) ?? '').trim() || undefined,
       input_type:    inputType,
       follower_depth: Number(fd.get('follower_depth')),
       max_results:   maxResultsRaw ? Number(maxResultsRaw) : undefined,

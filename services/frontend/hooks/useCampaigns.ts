@@ -7,6 +7,14 @@ import type { Campaign, CreateCampaignInput, CampaignStatus, UpdateCampaignInput
 
 export const CAMPAIGNS_KEY = ['campaigns'] as const
 
+export function useCampaign(id: string) {
+  return useQuery<Campaign>({
+    queryKey: [...CAMPAIGNS_KEY, id],
+    queryFn: () => api.get<Campaign>(`/api/v1/campaigns/${id}`).then((r) => r.data),
+    enabled: !!id,
+  })
+}
+
 // Fetch all campaigns for the authenticated user, with an optional status filter.
 export function useCampaigns(status?: CampaignStatus) {
   const queryKey = status ? [...CAMPAIGNS_KEY, { status }] : CAMPAIGNS_KEY
